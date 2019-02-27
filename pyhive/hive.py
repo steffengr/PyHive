@@ -27,7 +27,14 @@ import logging
 import sys
 import thrift.protocol.TBinaryProtocol
 import thrift.transport.TSocket
+import thrift.transport.TSSLSocket
 import thrift.transport.TTransport
+import jks
+import os
+from pathlib import Path
+import textwrap
+import base64
+import ssl
 
 # PEP 249 module globals
 apilevel = '2.0'
@@ -99,7 +106,7 @@ class Connection(object):
 
     def __init__(self, host=None, port=None, username=None, database='default', auth=None,
                  configuration=None, kerberos_service_name=None, password=None,
-                 thrift_transport=None):
+                 keystore=None, truststore=None, keystore_password=None , thrift_transport=None):
         """Connect to HiveServer2
 
         :param host: What host HiveServer2 runs on
@@ -109,6 +116,8 @@ class Connection(object):
         :param configuration: A dictionary of Hive settings (functionally same as the `set` command)
         :param kerberos_service_name: Use with auth='KERBEROS' only
         :param password: Use with auth='LDAP' or auth='CUSTOM' only
+        :param keystore: keystore file (jks format)
+        :param truststore: truststore file (jks format)
         :param thrift_transport: A ``TTransportBase`` for custom advanced usage.
             Incompatible with host, port, auth, kerberos_service_name, and password.
 
@@ -143,8 +152,20 @@ class Connection(object):
                 port = 10000
             if auth is None:
                 auth = 'NONE'
-            socket = thrift.transport.TSocket.TSocket(host, port)
-            if auth == 'NOSASL':
+
+            if auth == 'CERTIFICATES':
+                _generate_pem_files(keystore, truststore, keystore_password)
+
+                # Disable hostname validation
+                socket = thrift.transport.TSSLSocket.TSSLSocket(host, port,
+                                cert_reqs=ssl.CERT_REQUIRED,
+                                keyfile='keyfile',
+                                certfile='certfile', ca_certs='ca_chain',
+                                validate_callback=lambda cert, host: True)
+            else:
+                socket = thrift.transport.TSocket.TSocket(host, port)
+
+            if auth in ('NOSASL', 'CERTIFICATES'):
                 # NOSASL corresponds to hive.server2.authentication=NOSASL in hive-site.xml
                 self._transport = thrift.transport.TTransport.TBufferedTransport(socket)
             elif auth in ('LDAP', 'KERBEROS', 'NONE', 'CUSTOM'):
@@ -179,7 +200,7 @@ class Connection(object):
                 # https://cwiki.apache.org/confluence/display/Hive/Setting+Up+HiveServer2#SettingUpHiveServer2-Configuration
                 # PAM currently left to end user via thrift_transport option.
                 raise NotImplementedError(
-                    "Only NONE, NOSASL, LDAP, KERBEROS, CUSTOM "
+                    "Only NONE, NOSASL, LDAP, KERBEROS, CERTIFICATES, CUSTOM "
                     "authentication are supported, got {}".format(auth))
 
         protocol = thrift.protocol.TBinaryProtocol.TBinaryProtocol(self._transport)
@@ -190,11 +211,30 @@ class Connection(object):
 
         try:
             self._transport.open()
-            open_session_req = ttypes.TOpenSessionReq(
-                client_protocol=protocol_version,
-                configuration=configuration,
-                username=username,
-            )
+            if auth == 'CERTIFICATES':
+                # Hops code, send the JKS key/trustStores to hive to be used for impersonation
+                with keystore.open('rb') as f:
+                    keystore_content = f.read()
+
+                with truststore.open('rb') as f:
+                    truststore_content = f.read()
+
+                open_session_req = ttypes.TOpenSessionReq(
+                    client_protocol=protocol_version,
+                    configuration=configuration,
+                    keyStore=keystore_content,
+                    keyStorePassword=keystore_password,
+                    trustStore=truststore_content,
+                    trustStorePassword=keystore_password,
+                    username=username,
+                )
+            else:
+                open_session_req = ttypes.TOpenSessionReq(
+                    client_protocol=protocol_version,
+                    configuration=configuration,
+                    username=username,
+                )
+
             response = self._client.OpenSession(open_session_req)
             _check_status(response)
             assert response.sessionHandle is not None, "Expected a session from OpenSession"
@@ -493,3 +533,58 @@ def _check_status(response):
     _logger.debug(response)
     if response.status.statusCode != ttypes.TStatusCode.SUCCESS_STATUS:
         raise OperationalError(response)
+
+
+def _generate_pem_files(keystore_path, truststore_path, password):
+    """
+    Utility function to extract key, cert and ca_chain from the java keystore, truststore given in input
+    Args:
+        keystore_path: Path to the jks keystore
+        truststore_path: Path to the jks truststore
+        password: password to decript keys
+    """
+    keystore = jks.KeyStore.load(keystore_path, password, try_decrypt_keys=True)
+
+    private_keys = ""
+    certs = ""
+    ca_chain = ""
+
+    for alias, pk in keystore.private_keys.items():
+        if pk.algorithm_oid == jks.util.RSA_ENCRYPTION_OID:
+            private_keys = private_keys + _bytes_to_pem_str(pk.pkey, "RSA PRIVATE KEY")
+        else:
+            private_keys = private_keys + _bytes_to_pem_str(pk.pkey_pkcs8, "PRIVATE KEY")
+
+        for c in pk.cert_chain:
+            # c[0] contains type of cert, i.e X.509
+            certs = certs + _bytes_to_pem_str(c[1], "CERTIFICATE")
+
+    truststore = jks.KeyStore.load(truststore_path, password, try_decrypt_keys=True)
+
+    for alias, cert in truststore.certs.items():
+        ca_chain = ca_chain + _bytes_to_pem_str(cert.cert, "CERTIFICATE")
+
+    with open('ca_chain', 'w') as f:
+        f.write(ca_chain)
+
+    with open('keyfile', 'w') as f:
+        f.write(private_keys)
+
+    with open('certfile', 'w') as f:
+        f.write(certs)
+
+
+def _bytes_to_pem_str(der_bytes, pem_type):
+    """
+    Utility function for creating PEM files
+    Args:
+        der_bytes: DER encoded bytes
+        pem_type: type of PEM, e.g Certificate, Private key, or RSA private key
+    Returns:
+        PEM String for a DER-encoded certificate or private key
+    """
+    pem_str = ""
+    pem_str = pem_str + "-----BEGIN {}-----".format(pem_type) + "\n"
+    pem_str = pem_str + "\r\n".join(textwrap.wrap(base64.b64encode(der_bytes).decode('ascii'), 64)) + "\n"
+    pem_str = pem_str + "-----END {}-----".format(pem_type) + "\n"
+    return pem_str

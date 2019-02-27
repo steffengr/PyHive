@@ -23,13 +23,13 @@ with open('README.rst') as readme:
     long_description = readme.read()
 
 setup(
-    name="PyHive",
+    name="PyHopsHive",
     version=pyhive.__version__,
-    description="Python interface to Hive",
+    description="Python interface to Hops Hive",
     long_description=long_description,
-    url='https://github.com/dropbox/PyHive',
-    author="Jing Wang",
-    author_email="jing@dropbox.com",
+    url='https://github.com/logicalclocks/PyHive',
+    author="Jing Wang, Fabio Buso",
+    author_email="jing@dropbox.com, fabio@logicalclocks.com",
     license="Apache License, Version 2.0",
     packages=['pyhive', 'TCLIService'],
     classifiers=[
@@ -40,6 +40,7 @@ setup(
     ],
     install_requires=[
         'future',
+        'pyjks',
         'python-dateutil',
     ],
     extras_require={

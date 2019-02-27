@@ -6,6 +6,7 @@ cover/
 /env/
 /htmlcov/
 .idea/
+.vscode/
 .project
 *.pyc
 .pydevproject
