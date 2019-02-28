@@ -213,10 +213,10 @@ class Connection(object):
             self._transport.open()
             if auth == 'CERTIFICATES':
                 # Hops code, send the JKS key/trustStores to hive to be used for impersonation
-                with keystore.open('rb') as f:
+                with open(keystore, 'rb') as f:
                     keystore_content = f.read()
 
-                with truststore.open('rb') as f:
+                with open(truststore, 'rb') as f:
                     truststore_content = f.read()
 
                 open_session_req = ttypes.TOpenSessionReq(
