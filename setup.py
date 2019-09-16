@@ -47,6 +47,7 @@ setup(
         'presto': ['requests>=1.0.0'],
         'hive': ['sasl>=0.2.1', 'thrift>=0.10.0', 'thrift_sasl>=0.1.0'],
         'sqlalchemy': ['sqlalchemy>=0.8.7'],
+        'thrift': ['thrift>=0.10.0'],
     },
     tests_require=[
         'mock>=1.0.0',
